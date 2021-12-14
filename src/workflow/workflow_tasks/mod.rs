@@ -135,7 +135,7 @@ pub enum ActivationAction {
 }
 
 macro_rules! machine_mut {
-    ($myself:ident, $run_id:ident, $task_token:ident, $clos:expr) => {{
+    ($myself:ident, $run_id:ident, $clos:expr) => {{
         $myself
             .workflow_machines
             .access($run_id, $clos)
@@ -143,7 +143,6 @@ macro_rules! machine_mut {
             .map_err(|source| WorkflowUpdateError {
                 source,
                 run_id: $run_id.to_owned(),
-                task_token: Some($task_token.clone()),
             })
     }};
 }
@@ -256,6 +255,7 @@ impl WorkflowTaskManager {
         debug!(
             task_token = %&work.task_token,
             history_length = %work.history.events.len(),
+            attempt = %work.attempt,
             "Applying new workflow task from server"
         );
         let task_start_time = Instant::now();
@@ -364,7 +364,6 @@ impl WorkflowTaskManager {
                             return Err(WorkflowUpdateError {
                                 source: WFMachinesError::Fatal("Legacy query activation response included other commands, this is not allowed and constitutes an error in the lang SDK".to_string()),
                                 run_id: run_id.to_string(),
-                                task_token: Some(task_token)
                             });
                         }
                         query_responses.push(qr);
@@ -375,27 +374,23 @@ impl WorkflowTaskManager {
             }
 
             // Send commands from lang into the machines
-            machine_mut!(self, run_id, task_token, |wfm: &mut WorkflowManager| {
+            machine_mut!(self, run_id, |wfm: &mut WorkflowManager| {
                 wfm.push_commands(commands).boxed()
             })?;
             // Check if the workflow run needs another activation and queue it up if there is one
             // by pushing it into the pending activations list
-            let next_activation = machine_mut!(
-                self,
-                run_id,
-                task_token,
-                move |mgr: &mut WorkflowManager| mgr.get_next_activation().boxed()
-            )?;
+            let next_activation = machine_mut!(self, run_id, move |mgr: &mut WorkflowManager| mgr
+                .get_next_activation()
+                .boxed())?;
             if !next_activation.jobs.is_empty() {
                 self.pending_activations.push(next_activation);
                 let _ = self.pending_activations_notifier.send(true);
             }
             // We want to fetch the outgoing commands only after any new activation has been queued,
             // as doing so may have altered the outgoing commands.
-            let server_cmds =
-                machine_mut!(self, run_id, task_token, |wfm: &mut WorkflowManager| {
-                    async move { Ok(wfm.get_server_commands()) }.boxed()
-                })?;
+            let server_cmds = machine_mut!(self, run_id, |wfm: &mut WorkflowManager| {
+                async move { Ok(wfm.get_server_commands()) }.boxed()
+            })?;
             // We only actually want to send commands back to the server if there are no more
             // pending activations and we are caught up on replay.
             if !self.pending_activations.has_pending(run_id) && !server_cmds.replaying {
@@ -448,7 +443,7 @@ impl WorkflowTaskManager {
         } else {
             // Blow up any cached data associated with the workflow
             let should_report = self
-                .request_eviction(run_id, "Activation failed by lang")
+                .request_eviction(run_id, "Activation failed")
                 .map_or(true, |attempt| attempt <= 1);
             if should_report {
                 FailedActivationOutcome::Report(tt)
@@ -507,11 +502,7 @@ impl WorkflowTaskManager {
 
                 Ok((wft_info, activation))
             }
-            Err(source) => Err(WorkflowUpdateError {
-                source,
-                run_id,
-                task_token: Some(wft_info.task_token),
-            }),
+            Err(source) => Err(WorkflowUpdateError { source, run_id }),
         }
     }
 

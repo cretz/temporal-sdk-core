@@ -264,6 +264,7 @@ pub mod coresdk {
     }
 
     pub mod workflow_completion {
+        use crate::temporal::api::failure;
         tonic::include_proto!("coresdk.workflow_completion");
 
         impl wf_activation_completion::Status {
@@ -272,6 +273,12 @@ pub mod coresdk {
                     Self::Successful(_) => true,
                     Self::Failed(_) => false,
                 }
+            }
+        }
+
+        impl From<failure::v1::Failure> for Failure {
+            fn from(f: failure::v1::Failure) -> Self {
+                Failure { failure: Some(f) }
             }
         }
     }
