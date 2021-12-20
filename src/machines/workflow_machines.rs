@@ -61,6 +61,10 @@ pub(crate) struct WorkflowMachines {
     /// Eventually, this number should reach the started id in the latest history update, but
     /// we must incrementally apply the history while communicating with lang.
     next_started_event_id: i64,
+    /// The event id of the most recent event processed. It's possible in some situations (ex legacy
+    /// queries) to receive a history with no new workflow tasks. If the last history we processed
+    /// also had no new tasks, we need a way to know not to apply the same events over again.
+    last_processed_event: i64,
     /// True if the workflow is replaying from history
     pub replaying: bool,
     /// Namespace this workflow exists in
@@ -120,7 +124,6 @@ struct CommandAndMachine {
 
 #[derive(Debug, Clone, Copy)]
 struct ChangeInfo {
-    deprecated: bool,
     created_command: bool,
 }
 
@@ -196,6 +199,7 @@ impl WorkflowMachines {
             // In an ideal world one could say ..Default::default() here and it'd still work.
             current_started_event_id: 0,
             next_started_event_id: 0,
+            last_processed_event: 0,
             workflow_start_time: None,
             workflow_end_time: None,
             current_wf_time: None,
@@ -529,11 +533,16 @@ impl WorkflowMachines {
         }
 
         let last_handled_wft_started_id = self.current_started_event_id;
-        let events = self
-            .last_history_from_server
-            .take_next_wft_sequence(last_handled_wft_started_id)
-            .await
-            .map_err(WFMachinesError::HistoryFetchingError)?;
+        let events = {
+            let mut evts = self
+                .last_history_from_server
+                .take_next_wft_sequence(last_handled_wft_started_id)
+                .await
+                .map_err(WFMachinesError::HistoryFetchingError)?;
+            // Do not re-process events we have already processed
+            evts.retain(|e| e.event_id > self.last_processed_event);
+            evts
+        };
 
         // We're caught up on reply if there are no new events to process
         // TODO: Probably this is unneeded if we evict whenever history is from non-sticky queue
@@ -564,23 +573,17 @@ impl WorkflowMachines {
 
         while let Some(event) = history.next() {
             let next_event = history.peek();
-
-            if event.event_type == EventType::WorkflowTaskStarted as i32 && next_event.is_none() {
-                self.handle_event(event, false)?;
-                break;
-            }
-
             self.handle_event(event, next_event.is_some())?;
+            self.last_processed_event = event.event_id;
         }
 
         // Scan through to the next WFT, searching for any patch markers, so that we can
         // pre-resolve them.
         for e in self.last_history_from_server.peek_next_wft_sequence() {
-            if let Some((patch_id, deprecated)) = e.get_changed_marker_details() {
+            if let Some((patch_id, _)) = e.get_changed_marker_details() {
                 self.encountered_change_markers.insert(
                     patch_id.clone(),
                     ChangeInfo {
-                        deprecated,
                         created_command: false,
                     },
                 );
@@ -743,7 +746,6 @@ impl WorkflowMachines {
                             self.encountered_change_markers.insert(
                                 attrs.patch_id,
                                 ChangeInfo {
-                                    deprecated: attrs.deprecated,
                                     created_command: true,
                                 },
                             );

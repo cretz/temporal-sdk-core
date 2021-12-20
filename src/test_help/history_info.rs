@@ -39,6 +39,7 @@ impl HistoryInfo {
             return Err(HistoryInfoError::HistoryEndsUnexpectedly);
         }
 
+        let is_all_hist = to_wf_task_num.is_none();
         let to_wf_task_num = to_wf_task_num.unwrap_or(usize::MAX);
         let mut workflow_task_started_event_id = 0;
         let mut previous_started_event_id = 0;
@@ -83,7 +84,7 @@ impl HistoryInfo {
             }
 
             if next_event.is_none() {
-                if event.is_final_wf_execution_event() {
+                if event.is_final_wf_execution_event() || is_all_hist {
                     return Ok(Self {
                         previous_started_event_id,
                         workflow_task_started_event_id,

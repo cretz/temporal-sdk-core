@@ -325,19 +325,20 @@ impl WorkflowTaskManager {
             return Ok(None);
         }
 
-        let task_token = if let Some(entry) = self.workflow_machines.get_task(run_id) {
-            entry.info.task_token.clone()
-        } else {
-            if !self.activation_has_eviction(run_id) {
-                // Don't bother warning if this was an eviction, since it's normal to issue
-                // eviction activations without an associated workflow task in that case.
-                warn!(
-                    run_id,
-                    "Attempted to complete activation for nonexistent run"
-                );
-            }
-            return Ok(None);
-        };
+        let (task_token, is_leg_query_task) =
+            if let Some(entry) = self.workflow_machines.get_task(run_id) {
+                (entry.info.task_token.clone(), entry.legacy_query.is_some())
+            } else {
+                if !self.activation_has_eviction(run_id) {
+                    // Don't bother warning if this was an eviction, since it's normal to issue
+                    // eviction activations without an associated workflow task in that case.
+                    warn!(
+                        run_id,
+                        "Attempted to complete activation for run without associated workflow task"
+                    );
+                }
+                return Ok(None);
+            };
 
         // If the only command in the activation is a legacy query response, that means we need
         // to respond differently than a typical activation.
@@ -391,9 +392,15 @@ impl WorkflowTaskManager {
             let server_cmds = machine_mut!(self, run_id, |wfm: &mut WorkflowManager| {
                 async move { Ok(wfm.get_server_commands()) }.boxed()
             })?;
+            let is_query_playback = is_leg_query_task && query_responses.is_empty();
             // We only actually want to send commands back to the server if there are no more
-            // pending activations and we are caught up on replay.
-            if !self.pending_activations.has_pending(run_id) && !server_cmds.replaying {
+            // pending activations and we are caught up on replay. We don't want to complete a wft
+            // if we already saw the final event in the workflow, or if we are playing back for the
+            // express purpose of fulfilling a query
+            if !self.pending_activations.has_pending(run_id)
+                && !server_cmds.replaying
+                && !is_query_playback
+            {
                 Some(ServerCommandsWithWorkflowInfo {
                     task_token,
                     action: ActivationAction::WftComplete {
